@@ -1,5 +1,15 @@
 import { defineStore } from 'pinia'
-import type { Exhibit, Hall, Language, LanguageDraft, PersistedState, ScriptStatus, Segment, VersionSnapshot } from '~/types'
+import type { Exhibit, Hall, Language, LanguageDraft, PersistedState, ScriptStatus, Segment, SegmentComment, VersionSnapshot } from '~/types'
+
+export const segmentReturned = (segment: Segment): boolean => segment.comments.some(comment => !comment.resolved)
+
+function migrateSegments(state: PersistedState) {
+  const fix = (draft?: LanguageDraft) => draft?.segments?.forEach((segment) => {
+    if (!Array.isArray(segment.comments)) segment.comments = []
+  })
+  state.exhibits?.forEach(exhibit => exhibit.drafts?.forEach(fix))
+  state.versions?.forEach(version => fix(version.draft))
+}
 
 export const LANGUAGES: Language[] = [
   { id: 'zh', code: 'zh-CN', label: '简体中文', shortLabel: '中' },
@@ -13,7 +23,8 @@ const segments = (prefix: string, values: Array<[string, string, boolean?]>): Se
   id: `${prefix}-${index + 1}`,
   label,
   content,
-  locked: Boolean(locked)
+  locked: Boolean(locked),
+  comments: [] as SegmentComment[]
 }))
 
 function demoState(): PersistedState {
@@ -35,8 +46,8 @@ function demoState(): PersistedState {
           segments: segments('jade-zh', [
             ['开场定位', '这件玉琮来自距今约五千年的良渚文化。', true],
             ['器物观察', '它外方内圆，四角雕刻神人兽面纹。', true],
-            ['文化含义', '玉琮常被看作沟通天地的礼器，也象征权力与身份。'],
-            ['参观提示', '请沿展柜顺时针观察，触摸复制品前先使用免洗消毒液。']
+            ['文化含义', '玉琮常被看作沟通天地的礼器，也象征权力与身份。', true],
+            ['参观提示', '请沿展柜顺时针观察，触摸复制品前先使用免洗消毒液。', true]
           ])
         },
         {
@@ -75,10 +86,9 @@ function demoState(): PersistedState {
           durationMinutes: 3, sources: '《殷周青铜器通论》；展品说明卡 A-08',
           status: 'returned', updatedAt: '2026-09-23T11:20:00.000Z',
           segments: segments('bronze-zh', [
-            ['器物介绍', '这是一件商代青铜爵，用于温酒和饮酒。'],
-            ['结构说明', '三足使器身稳定，前端的流便于倾倒。'],
-            ['礼制背景', '青铜器数量与形制反映了使用者的身份。'],
-            ['修改说明', '审校意见：补充“柱饰”的用途，并核对年代。']
+            ['器物介绍', '这是一件商代青铜爵，用于温酒和饮酒。', true],
+            ['结构说明', '三足使器身稳定，前端的流便于倾倒。', true],
+            ['礼制背景', '青铜器数量与形制反映了使用者的身份。']
           ])
         },
         {
@@ -103,6 +113,20 @@ function demoState(): PersistedState {
       }]
     }
   ]
+  const bronzeBackground = exhibits[1].drafts[0].segments[2]
+  bronzeBackground.comments.push({
+    id: 'comment-bronze-zh-1',
+    text: '请补充“柱饰”的用途说明，并核对“商代”这一年代判断的依据。',
+    createdAt: '2026-09-23T10:05:00.000Z',
+    resolved: false
+  })
+  const jadeEnVisual = exhibits[0].drafts[1].segments[1]
+  jadeEnVisual.comments.push({
+    id: 'comment-jade-en-1',
+    text: '“spirit-and-animal motifs” 建议统一为图录中的 “anthropo-zoomorphic motif”，已在最新稿中保留原译并加注释。',
+    createdAt: '2026-09-24T01:40:00.000Z',
+    resolved: true
+  })
   return {
     halls,
     exhibits,
@@ -144,6 +168,16 @@ export const useScriptStore = defineStore('museum-script', {
     wordCount(): number {
       return (this.selectedDraft?.narration || '').replace(/\s/g, '').length
     },
+    allSegmentsConfirmed(): boolean {
+      const segments = this.selectedDraft?.segments || []
+      return segments.length > 0 && segments.every(segment => segment.locked)
+    },
+    pendingSegments(): Segment[] {
+      const segments = this.selectedDraft?.segments || []
+      return segments
+        .filter(segment => segmentReturned(segment) || !segment.locked)
+        .sort((a, b) => Number(segmentReturned(b)) - Number(segmentReturned(a)))
+    },
     canUndo(state): boolean { return state.past.length > 0 },
     canRedo(state): boolean { return state.future.length > 0 }
   },
@@ -154,6 +188,7 @@ export const useScriptStore = defineStore('museum-script', {
       if (saved) {
         try {
           const data = JSON.parse(saved) as PersistedState
+          migrateSegments(data)
           this.$patch({ ...data, hydrated: true })
           if (!this.halls.length || !this.exhibits.length) this.resetDemo()
         } catch {
@@ -216,34 +251,104 @@ export const useScriptStore = defineStore('museum-script', {
     updateDraft(patch: Partial<Pick<LanguageDraft, 'title' | 'narration' | 'accessibility' | 'durationMinutes' | 'sources'>>) {
       const draft = this.selectedDraft
       if (!draft) return
+      if (draft.status === 'approved') {
+        this.notice = '已定稿语言不能直接覆盖，请先将审校状态调整为可编辑。'
+        return
+      }
       this.commit(() => Object.assign(draft, patch, { updatedAt: new Date().toISOString() }))
       this.notice = '改动已自动保存到浏览器。'
     },
     updateSegment(id: string, patch: Partial<Pick<Segment, 'label' | 'content'>>) {
-      const segment = this.selectedDraft?.segments.find(item => item.id === id)
-      if (!segment || segment.locked) return
+      const draft = this.selectedDraft
+      const segment = draft?.segments.find(item => item.id === id)
+      if (!draft || !segment || segment.locked) return
+      if (draft.status === 'approved') {
+        this.notice = '已定稿语言不能直接覆盖，请先将审校状态调整为可编辑。'
+        return
+      }
       this.commit(() => Object.assign(segment, patch))
     },
-    toggleLock(id: string) {
-      const segment = this.selectedDraft?.segments.find(item => item.id === id)
-      if (!segment) return
-      this.commit(() => { segment.locked = !segment.locked })
-      this.notice = segment.locked ? '段落已锁定，避免误改。' : '段落已解锁。'
+    returnSegment(id: string, reason: string) {
+      const draft = this.selectedDraft
+      const segment = draft?.segments.find(item => item.id === id)
+      const text = reason.trim()
+      if (!draft || !segment || !text) return
+      if (draft.status === 'approved') {
+        this.notice = '已定稿语言不能直接退回，请先调整审校状态。'
+        return
+      }
+      if (segment.locked) {
+        this.notice = '该段落已确认锁定，不能退回。'
+        return
+      }
+      this.commit(() => {
+        segment.comments.push({ id: `comment-${Date.now()}`, text, createdAt: new Date().toISOString(), resolved: false })
+        if (draft.status === 'review') draft.status = 'returned'
+        draft.updatedAt = new Date().toISOString()
+      })
+      this.notice = `已退回“${segment.label || '未命名段落'}”，原因已记录。`
+    },
+    confirmSegment(id: string) {
+      const draft = this.selectedDraft
+      const segment = draft?.segments.find(item => item.id === id)
+      if (!draft || !segment || segment.locked) return
+      if (draft.status === 'approved') return
+      if (segmentReturned(segment)) {
+        this.notice = '该段落仍有未处理的退回意见，作者重新提交前不能确认。'
+        return
+      }
+      this.commit(() => { segment.locked = true })
+      this.notice = this.allSegmentsConfirmed ? '所有段落均已确认，可以定稿。' : '段落已确认并锁定。'
+    },
+    unconfirmSegment(id: string) {
+      const draft = this.selectedDraft
+      const segment = draft?.segments.find(item => item.id === id)
+      if (!draft || !segment || !segment.locked) return
+      if (draft.status === 'approved') {
+        this.notice = '已定稿语言不能直接修改，请先调整审校状态。'
+        return
+      }
+      this.commit(() => { segment.locked = false })
+      this.notice = '已取消确认，段落可再次编辑。'
+    },
+    resubmit() {
+      const draft = this.selectedDraft
+      if (!draft) return
+      const hasOpenComments = draft.segments.some(segmentReturned)
+      if (draft.status !== 'returned' && !hasOpenComments) return
+      this.commit(() => {
+        draft.segments.forEach(segment => segment.comments.forEach((comment) => { comment.resolved = true }))
+        draft.status = 'review'
+        draft.updatedAt = new Date().toISOString()
+      })
+      this.notice = '已重新提交审校：退回标记已清除，历史意见仍可查看。'
     },
     addSegment() {
       const draft = this.selectedDraft
       if (!draft) return
-      this.commit(() => draft.segments.push({ id: `segment-${Date.now()}`, label: `新段落 ${draft.segments.length + 1}`, content: '', locked: false }))
+      if (draft.status === 'approved') {
+        this.notice = '已定稿语言不能直接修改，请先调整审校状态。'
+        return
+      }
+      this.commit(() => draft.segments.push({ id: `segment-${Date.now()}`, label: `新段落 ${draft.segments.length + 1}`, content: '', locked: false, comments: [] }))
     },
     removeSegment(id: string) {
       const draft = this.selectedDraft
       const segment = draft?.segments.find(item => item.id === id)
       if (!draft || !segment || segment.locked) return
+      if (draft.status === 'approved') {
+        this.notice = '已定稿语言不能直接修改，请先调整审校状态。'
+        return
+      }
       this.commit(() => { draft.segments = draft.segments.filter(item => item.id !== id) })
     },
     setStatus(status: ScriptStatus) {
       const draft = this.selectedDraft
       if (!draft) return
+      if (status === 'approved' && !this.allSegmentsConfirmed) {
+        this.notice = '还有段落未确认，所有段落确认后才能定稿。'
+        return
+      }
       this.commit(() => { draft.status = status; draft.updatedAt = new Date().toISOString() })
       this.notice = `状态已更新为“${this.statusLabel(status)}”。`
     },
@@ -267,17 +372,24 @@ export const useScriptStore = defineStore('museum-script', {
     restoreVersion(id: string) {
       const version = this.versions.find(item => item.id === id)
       if (!version) return
+      const exhibit = this.exhibits.find(item => item.id === version.exhibitId)
+      const current = exhibit?.drafts.find(item => item.languageId === version.languageId)
+      if (current?.status === 'approved') {
+        this.notice = '该语言已定稿，不能直接覆盖。请先调整审校状态再恢复版本。'
+        return
+      }
       this.commit(() => {
-        const exhibit = this.exhibits.find(item => item.id === version.exhibitId)
         if (!exhibit) return
         const index = exhibit.drafts.findIndex(item => item.languageId === version.languageId)
         const restored = JSON.parse(JSON.stringify(version.draft)) as LanguageDraft
+        restored.status = 'review'
+        restored.updatedAt = new Date().toISOString()
         if (index >= 0) exhibit.drafts[index] = restored
         else exhibit.drafts.push(restored)
       })
       this.selectedExhibitId = version.exhibitId
       this.selectedLanguageId = version.languageId
-      this.notice = '版本已恢复，并作为一次可撤销操作保存。'
+      this.notice = '版本已恢复：段落锁定与审校意见一并还原，稿件重新进入待审。'
     },
     undo() {
       const state = this.past.pop()

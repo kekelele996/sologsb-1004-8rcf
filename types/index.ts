@@ -7,11 +7,19 @@ export interface Hall {
   description: string
 }
 
+export interface SegmentComment {
+  id: string
+  text: string
+  createdAt: string
+  resolved: boolean
+}
+
 export interface Segment {
   id: string
   label: string
   content: string
   locked: boolean
+  comments: SegmentComment[]
 }
 
 export interface LanguageDraft {

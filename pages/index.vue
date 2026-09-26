@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { DeviceKind, DiffLine, LanguageDraft, ScriptStatus, Segment } from '~/types'
-import { LANGUAGES, useScriptStore } from '~/stores/script'
+import { LANGUAGES, segmentReturned, useScriptStore } from '~/stores/script'
 
 const store = useScriptStore()
 const activeTab = ref('editor')
@@ -12,6 +12,8 @@ const compareA = ref('')
 const compareB = ref('')
 const helpDialog = ref(false)
 const deleteTarget = ref<string | null>(null)
+const returnTarget = ref<string | null>(null)
+const returnReason = ref('')
 
 const statusOptions: Array<{ value: ScriptStatus; label: string; color: string }> = [
   { value: 'draft', label: '草稿', color: 'grey' },
@@ -30,6 +32,10 @@ const draft = computed(() => store.selectedDraft)
 const exhibit = computed(() => store.selectedExhibit)
 const currentLanguage = computed(() => LANGUAGES.find(item => item.id === store.selectedLanguageId))
 const currentStatus = computed(() => statusOptions.find(item => item.value === draft.value?.status) || statusOptions[0])
+const allConfirmed = computed(() => store.allSegmentsConfirmed)
+const pendingSegments = computed(() => store.pendingSegments)
+const confirmedCount = computed(() => draft.value?.segments.filter(item => item.locked).length || 0)
+const returnedCount = computed(() => draft.value?.segments.filter(segmentReturned).length || 0)
 const filteredExhibits = computed(() => store.hallExhibits.filter(item => !leftFilter.value || `${item.code} ${item.title}`.toLowerCase().includes(leftFilter.value.toLowerCase())))
 const versions = computed(() => store.versions.filter(item => item.exhibitId === store.selectedExhibitId && item.languageId === store.selectedLanguageId))
 const selectedVersionA = computed(() => versions.value.find(item => item.id === compareA.value))
@@ -83,6 +89,32 @@ function submitVersion() {
 function confirmDelete() {
   if (deleteTarget.value) store.removeSegment(deleteTarget.value)
   deleteTarget.value = null
+}
+function openReturnDialog(id: string) {
+  returnTarget.value = id
+  returnReason.value = ''
+}
+function submitReturn() {
+  if (returnTarget.value) store.returnSegment(returnTarget.value, returnReason.value)
+  returnTarget.value = null
+  returnReason.value = ''
+}
+function jumpToSegment(id: string) {
+  activeTab.value = 'editor'
+  nextTick(() => {
+    const row = document.getElementById(`segment-${id}`)
+    row?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    row?.querySelector<HTMLTextAreaElement>('textarea')?.focus({ preventScroll: true })
+  })
+}
+function openComments(segment: Segment) {
+  return segment.comments.filter(comment => !comment.resolved)
+}
+function pastComments(segment: Segment) {
+  return segment.comments.filter(comment => comment.resolved)
+}
+function statusItemProps(item: { value: ScriptStatus }) {
+  return { disabled: item.value === 'approved' && !allConfirmed.value }
 }
 function buildDiff(before: string, after: string): DiffLine[] {
   const a = before.split(/(?<=[。！？.!?])\s*/).filter(Boolean)
@@ -211,10 +243,17 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
                         <div class="section-title">当前文稿</div>
                         <div class="text-h6 font-weight-bold mt-1">{{ currentLanguage?.label }}</div>
                       </div>
-                      <div class="d-flex flex-wrap ga-2">
+                      <div class="d-flex flex-wrap ga-2 align-center">
+                        <v-btn
+                          v-if="draft.status === 'returned'"
+                          color="warning"
+                          prepend-icon="mdi-send-check-outline"
+                          @click="store.resubmit"
+                        >重新提交审校</v-btn>
                         <v-select
                           :model-value="draft.status"
                           :items="statusOptions"
+                          :item-props="statusItemProps"
                           item-title="label"
                           item-value="value"
                           label="审校状态"
@@ -222,52 +261,132 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
                           style="min-width:150px"
                           @update:model-value="store.setStatus"
                         />
-                        <v-btn color="primary" variant="tonal" prepend-icon="mdi-plus" @click="store.addSegment">新增段落</v-btn>
+                        <v-btn color="primary" variant="tonal" prepend-icon="mdi-plus" :disabled="draft.status === 'approved'" @click="store.addSegment">新增段落</v-btn>
                       </div>
                     </div>
+                    <v-alert v-if="!allConfirmed" class="mb-4" type="info" variant="tonal" density="compact">
+                      还有 {{ draft.segments.length - confirmedCount }} 段未确认，所有段落确认后才能定稿。
+                    </v-alert>
 
-                    <v-text-field label="展项标题" :model-value="draft.title" hint="面向观众的主标题" persistent-hint @change="saveDraftField('title', $event)" />
+                    <v-text-field label="展项标题" :model-value="draft.title" hint="面向观众的主标题" persistent-hint :readonly="draft.status === 'approved'" @change="saveDraftField('title', $event)" />
                     <v-row class="mt-2">
                       <v-col cols="12" md="5">
-                        <v-text-field label="预计朗读时长（分钟）" type="number" min="0" step="0.5" :model-value="draft.durationMinutes" @change="saveDraftField('durationMinutes', $event)" />
+                        <v-text-field label="预计朗读时长（分钟）" type="number" min="0" step="0.5" :model-value="draft.durationMinutes" :readonly="draft.status === 'approved'" @change="saveDraftField('durationMinutes', $event)" />
                       </v-col>
                       <v-col cols="12" md="7">
-                        <v-text-field label="资料来源" :model-value="draft.sources" hint="书籍、档案号或专家核验记录" persistent-hint @change="saveDraftField('sources', $event)" />
+                        <v-text-field label="资料来源" :model-value="draft.sources" hint="书籍、档案号或专家核验记录" persistent-hint :readonly="draft.status === 'approved'" @change="saveDraftField('sources', $event)" />
                       </v-col>
                     </v-row>
 
                     <div class="section-title mt-6 mb-2">完整讲解词</div>
-                    <v-textarea label="讲解词" rows="7" auto-grow counter :model-value="draft.narration" @change="saveDraftField('narration', $event)" />
+                    <v-textarea label="讲解词" rows="7" auto-grow counter :model-value="draft.narration" :readonly="draft.status === 'approved'" @change="saveDraftField('narration', $event)" />
 
                     <div class="section-title mt-6 mb-2">无障碍描述</div>
-                    <v-textarea label="无障碍描述" rows="4" auto-grow hint="描述尺寸、材质、色彩与可触摸特征，避免只依赖视觉" persistent-hint :model-value="draft.accessibility" @change="saveDraftField('accessibility', $event)" />
+                    <v-textarea label="无障碍描述" rows="4" auto-grow hint="描述尺寸、材质、色彩与可触摸特征，避免只依赖视觉" persistent-hint :model-value="draft.accessibility" :readonly="draft.status === 'approved'" @change="saveDraftField('accessibility', $event)" />
                   </v-card>
 
                   <v-card class="script-card pa-4 pa-md-6 mt-5">
-                    <div class="d-flex align-center justify-space-between mb-4">
+                    <div class="d-flex flex-wrap align-center justify-space-between ga-2 mb-4">
                       <div>
                         <div class="section-title">分段校对</div>
-                        <div class="text-body-2 text-medium-emphasis mt-1">锁定段落不会被编辑；可在撤销中恢复。</div>
+                        <div class="text-body-2 text-medium-emphasis mt-1">专家可退回未确认段并写明原因；已确认段保持锁定，重新提交后退回标记清除、意见保留。</div>
                       </div>
-                      <v-chip variant="tonal">{{ draft.segments.filter(item => item.locked).length }}/{{ draft.segments.length }} 已锁定</v-chip>
+                      <div class="d-flex ga-2">
+                        <v-chip v-if="returnedCount" color="error" variant="tonal">{{ returnedCount }} 段被退回</v-chip>
+                        <v-chip variant="tonal">{{ confirmedCount }}/{{ draft.segments.length }} 已确认</v-chip>
+                      </div>
                     </div>
                     <div class="d-flex flex-column ga-3">
-                      <div v-for="(segment, index) in draft.segments" :key="segment.id" class="segment-row" :class="{ locked: segment.locked }">
-                        <div class="d-flex align-center ga-2">
-                          <v-btn icon size="small" variant="text" :aria-label="segment.locked ? '解锁段落' : '锁定段落'" @click="store.toggleLock(segment.id)">
-                            {{ segment.locked ? '🔒' : '🔓' }}
-                          </v-btn>
+                      <div
+                        v-for="(segment, index) in draft.segments"
+                        :id="`segment-${segment.id}`"
+                        :key="segment.id"
+                        class="segment-row"
+                        :class="{ locked: segment.locked, returned: segmentReturned(segment) }"
+                      >
+                        <div class="d-flex flex-wrap align-center ga-2">
+                          <v-chip v-if="segment.locked" color="success" size="small" variant="tonal" prepend-icon="mdi-lock">已确认</v-chip>
+                          <v-chip v-else-if="segmentReturned(segment)" color="error" size="small" variant="tonal" prepend-icon="mdi-alert-circle-outline">已退回</v-chip>
+                          <v-chip v-else size="small" variant="tonal">待确认</v-chip>
                           <v-text-field :model-value="segment.label" density="compact" hide-details variant="plain" :readonly="segment.locked" :aria-label="`第 ${index + 1} 段标题`" @change="saveSegment(segment.id, 'label', $event)" />
-                          <v-chip v-if="segment.locked" color="success" size="small" variant="tonal">已确认</v-chip>
-                          <v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" :disabled="segment.locked" :aria-label="`删除第 ${index + 1} 段`" @click="deleteTarget = segment.id" />
+                          <v-btn
+                            v-if="!segment.locked"
+                            size="small"
+                            variant="text"
+                            color="success"
+                            prepend-icon="mdi-check"
+                            :disabled="segmentReturned(segment) || draft.status === 'approved'"
+                            :aria-label="`确认第 ${index + 1} 段`"
+                            @click="store.confirmSegment(segment.id)"
+                          >确认</v-btn>
+                          <v-btn
+                            v-else
+                            size="small"
+                            variant="text"
+                            prepend-icon="mdi-lock-open-variant-outline"
+                            :disabled="draft.status === 'approved'"
+                            :aria-label="`取消第 ${index + 1} 段确认`"
+                            @click="store.unconfirmSegment(segment.id)"
+                          >取消确认</v-btn>
+                          <v-btn
+                            size="small"
+                            variant="text"
+                            color="error"
+                            prepend-icon="mdi-flag-outline"
+                            :disabled="segment.locked || draft.status === 'approved'"
+                            :aria-label="`退回第 ${index + 1} 段`"
+                            @click="openReturnDialog(segment.id)"
+                          >退回</v-btn>
+                          <v-btn icon="mdi-delete-outline" size="small" variant="text" color="error" :disabled="segment.locked || draft.status === 'approved'" :aria-label="`删除第 ${index + 1} 段`" @click="deleteTarget = segment.id" />
                         </div>
                         <v-textarea class="mt-2" :model-value="segment.content" rows="2" auto-grow hide-details :readonly="segment.locked" :aria-label="segmentLabel(segment)" @change="saveSegment(segment.id, 'content', $event)" />
+                        <v-alert
+                          v-for="comment in openComments(segment)"
+                          :key="comment.id"
+                          class="mt-2"
+                          type="error"
+                          variant="tonal"
+                          density="compact"
+                        >
+                          退回原因：{{ comment.text }}<span class="text-caption ms-2">{{ formatTime(comment.createdAt) }}</span>
+                        </v-alert>
+                        <v-expansion-panels v-if="pastComments(segment).length" class="mt-2" variant="accordion">
+                          <v-expansion-panel>
+                            <v-expansion-panel-title class="text-body-2">历史意见（{{ pastComments(segment).length }} 条，已处理）</v-expansion-panel-title>
+                            <v-expansion-panel-text>
+                              <div v-for="comment in pastComments(segment)" :key="comment.id" class="text-body-2 mb-2">
+                                {{ comment.text }}<span class="text-caption text-medium-emphasis ms-2">{{ formatTime(comment.createdAt) }}</span>
+                              </div>
+                            </v-expansion-panel-text>
+                          </v-expansion-panel>
+                        </v-expansion-panels>
                       </div>
                     </div>
                   </v-card>
                 </v-col>
 
                 <v-col cols="12" lg="4">
+                  <v-card v-if="pendingSegments.length" class="script-card pa-5 mb-5">
+                    <div class="d-flex align-center justify-space-between mb-3">
+                      <div class="section-title">待处理段落</div>
+                      <v-chip size="small" color="warning" variant="tonal">{{ pendingSegments.length }} 段</v-chip>
+                    </div>
+                    <v-list density="compact" class="bg-transparent" nav>
+                      <v-list-item
+                        v-for="segment in pendingSegments"
+                        :key="segment.id"
+                        rounded="lg"
+                        :title="segmentLabel(segment)"
+                        :subtitle="segmentReturned(segment) ? `被退回：${openComments(segment)[0]?.text || ''}` : '尚未确认'"
+                        @click="jumpToSegment(segment.id)"
+                      >
+                        <template #prepend>
+                          <v-icon :color="segmentReturned(segment) ? 'error' : 'warning'" :icon="segmentReturned(segment) ? 'mdi-alert-circle-outline' : 'mdi-progress-clock'" />
+                        </template>
+                        <template #append><v-icon icon="mdi-arrow-right" size="small" /></template>
+                      </v-list-item>
+                    </v-list>
+                  </v-card>
                   <v-card class="script-card pa-5">
                     <div class="section-title mb-4">同展项语言进度</div>
                     <div v-for="lang in LANGUAGES" :key="lang.id" class="d-flex align-center ga-3 mb-4">
@@ -323,9 +442,15 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
                   </div>
                   <v-list class="mt-4 bg-transparent">
                     <v-list-item v-for="version in versions" :key="version.id" :title="version.name" :subtitle="formatTime(version.createdAt)">
-                      <template #append><v-btn variant="outlined" size="small" @click="store.restoreVersion(version.id)">恢复此版</v-btn></template>
+                      <template #append><v-btn variant="outlined" size="small" :disabled="draft.status === 'approved'" @click="store.restoreVersion(version.id)">恢复此版</v-btn></template>
                     </v-list-item>
                   </v-list>
+                  <v-alert v-if="draft.status === 'approved'" class="mt-3" type="warning" variant="tonal" density="compact">
+                    当前语言已定稿，不能直接覆盖。请先调整审校状态，再恢复历史版本；恢复后稿件会重新进入待审。
+                  </v-alert>
+                  <v-alert v-else class="mt-3" type="info" variant="tonal" density="compact">
+                    恢复版本会一并还原当时的段落锁定与审校意见，稿件重新进入待审。
+                  </v-alert>
                 </template>
               </v-card>
             </v-window-item>
@@ -360,17 +485,19 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
                 <v-col cols="12" md="7">
                   <v-card class="script-card pa-5">
                     <div class="section-title mb-3">来源与核验记录</div>
-                    <v-textarea :model-value="draft.sources" rows="8" @change="saveDraftField('sources', $event)" />
+                    <v-textarea :model-value="draft.sources" rows="8" :readonly="draft.status === 'approved'" @change="saveDraftField('sources', $event)" />
                     <v-alert class="mt-4" type="warning" variant="tonal">发布前请由内容负责人逐条核对来源。当前无障碍描述与实物尺寸需由教育部门复核。</v-alert>
                   </v-card>
                 </v-col>
                 <v-col cols="12" md="5">
                   <v-card class="script-card pa-5">
-                    <div class="section-title mb-3">段落锁定概况</div>
+                    <div class="section-title mb-3">段落确认概况</div>
                     <v-timeline density="compact" side="end">
-                      <v-timeline-item v-for="segment in draft.segments" :key="segment.id" :dot-color="segment.locked ? 'success' : 'grey'" size="small">
+                      <v-timeline-item v-for="segment in draft.segments" :key="segment.id" :dot-color="segment.locked ? 'success' : segmentReturned(segment) ? 'error' : 'grey'" size="small">
                         <div class="font-weight-medium">{{ segment.label }}</div>
-                        <div class="text-caption text-medium-emphasis">{{ segment.locked ? '已锁定，审校确认' : '编辑中' }}</div>
+                        <div class="text-caption text-medium-emphasis">
+                          {{ segment.locked ? '已确认锁定' : segmentReturned(segment) ? `被退回：${segment.comments.find(comment => !comment.resolved)?.text || ''}` : '待确认' }}
+                        </div>
                       </v-timeline-item>
                     </v-timeline>
                   </v-card>
@@ -399,6 +526,21 @@ function segmentLabel(segment: Segment) { return segment.label || '未命名段�
         <v-card-title>删除这个段落？</v-card-title>
         <v-card-text>删除后可使用撤销恢复。</v-card-text>
         <v-card-actions><v-spacer /><v-btn @click="deleteTarget = null">取消</v-btn><v-btn color="error" @click="confirmDelete">删除</v-btn></v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog :model-value="Boolean(returnTarget)" max-width="520" @update:model-value="returnTarget = null">
+      <v-card class="pa-3">
+        <v-card-title>退回段落</v-card-title>
+        <v-card-text>
+          <p class="mb-4 text-medium-emphasis">请写明退回原因。作者处理并重新提交后，退回标记会清除，意见保留在段落历史中。</p>
+          <v-textarea v-model="returnReason" label="退回原因" rows="3" autofocus @keyup.ctrl.enter="submitReturn" />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn @click="returnTarget = null">取消</v-btn>
+          <v-btn color="error" :disabled="!returnReason.trim()" @click="submitReturn">确认退回</v-btn>
+        </v-card-actions>
       </v-card>
     </v-dialog>
 
