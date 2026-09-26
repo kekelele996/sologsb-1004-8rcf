@@ -1,5 +1,6 @@
 export type ScriptStatus = 'draft' | 'review' | 'returned' | 'approved'
 export type DeviceKind = 'desktop' | 'tablet' | 'mobile' | 'kiosk'
+export type SegmentReviewStatus = 'pending' | 'confirmed' | 'returned'
 
 export interface Hall {
   id: string
@@ -7,11 +8,19 @@ export interface Hall {
   description: string
 }
 
+export interface ReviewEntry {
+  id: string
+  type: 'return' | 'resubmit'
+  note: string
+  createdAt: string
+}
+
 export interface Segment {
   id: string
   label: string
   content: string
-  locked: boolean
+  reviewStatus: SegmentReviewStatus
+  reviewLog: ReviewEntry[]
 }
 
 export interface LanguageDraft {

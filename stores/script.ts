@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import type { Exhibit, Hall, Language, LanguageDraft, PersistedState, ScriptStatus, Segment, VersionSnapshot } from '~/types'
+import type { Exhibit, Hall, Language, LanguageDraft, PersistedState, ScriptStatus, Segment, SegmentReviewStatus, VersionSnapshot } from '~/types'
 
 export const LANGUAGES: Language[] = [
   { id: 'zh', code: 'zh-CN', label: '简体中文', shortLabel: '中' },
@@ -9,11 +9,14 @@ export const LANGUAGES: Language[] = [
 
 const STORAGE_KEY = 'museum-script-studio-v1'
 
-const segments = (prefix: string, values: Array<[string, string, boolean?]>): Segment[] => values.map(([label, content, locked], index) => ({
+type SegmentSeed = [string, string] | [string, string, SegmentReviewStatus]
+
+const segments = (prefix: string, values: SegmentSeed[]): Segment[] => values.map(([label, content, reviewStatus], index) => ({
   id: `${prefix}-${index + 1}`,
   label,
   content,
-  locked: Boolean(locked)
+  reviewStatus: reviewStatus || 'pending',
+  reviewLog: []
 }))
 
 function demoState(): PersistedState {
@@ -33,10 +36,10 @@ function demoState(): PersistedState {
           durationMinutes: 2.5, sources: '《中国玉器全集》第一卷；本馆藏品档案 1987-J-042',
           status: 'approved', updatedAt: '2026-09-23T08:35:00.000Z',
           segments: segments('jade-zh', [
-            ['开场定位', '这件玉琮来自距今约五千年的良渚文化。', true],
-            ['器物观察', '它外方内圆，四角雕刻神人兽面纹。', true],
-            ['文化含义', '玉琮常被看作沟通天地的礼器，也象征权力与身份。'],
-            ['参观提示', '请沿展柜顺时针观察，触摸复制品前先使用免洗消毒液。']
+            ['开场定位', '这件玉琮来自距今约五千年的良渚文化。', 'confirmed'],
+            ['器物观察', '它外方内圆，四角雕刻神人兽面纹。', 'confirmed'],
+            ['文化含义', '玉琮常被看作沟通天地的礼器，也象征权力与身份。', 'confirmed'],
+            ['参观提示', '请沿展柜顺时针观察，触摸复制品前先使用免洗消毒液。', 'confirmed']
           ])
         },
         {
@@ -46,7 +49,7 @@ function demoState(): PersistedState {
           durationMinutes: 2.3, sources: 'Complete Collection of Chinese Jades, Vol. 1; Museum accession 1987-J-042',
           status: 'review', updatedAt: '2026-09-24T02:15:00.000Z',
           segments: segments('jade-en', [
-            ['Introduction', 'This jade cong is about five thousand years old.', true],
+            ['Introduction', 'This jade cong is about five thousand years old.', 'confirmed'],
             ['Visual description', 'Its square body encloses a circular opening, while spirit-and-animal motifs cover the corners.'],
             ['Meaning', 'Jade cong is understood as a ritual link between heaven and earth.']
           ])
@@ -74,12 +77,20 @@ function demoState(): PersistedState {
           accessibility: '器物为青铜色，器口一侧有长流，底部三足支撑。复制件配有可触摸的局部纹样。',
           durationMinutes: 3, sources: '《殷周青铜器通论》；展品说明卡 A-08',
           status: 'returned', updatedAt: '2026-09-23T11:20:00.000Z',
-          segments: segments('bronze-zh', [
-            ['器物介绍', '这是一件商代青铜爵，用于温酒和饮酒。'],
-            ['结构说明', '三足使器身稳定，前端的流便于倾倒。'],
-            ['礼制背景', '青铜器数量与形制反映了使用者的身份。'],
-            ['修改说明', '审校意见：补充“柱饰”的用途，并核对年代。']
-          ])
+          segments: (() => {
+            const list = segments('bronze-zh', [
+              ['器物介绍', '这是一件商代青铜爵，用于温酒和饮酒。', 'confirmed'],
+              ['结构说明', '三足使器身稳定，前端的流便于倾倒。'],
+              ['礼制背景', '青铜器数量与形制反映了使用者的身份。', 'returned']
+            ])
+            list[2].reviewLog.unshift({
+              id: 'review-bronze-zh-1',
+              type: 'return',
+              note: '请补充“柱饰”的用途说明，并核对青铜爵的年代断代。',
+              createdAt: '2026-09-23T11:20:00.000Z'
+            })
+            return list
+          })()
         },
         {
           id: 'draft-bronze-en', languageId: 'en', title: 'Bronze Jue and Ritual Order',
@@ -114,6 +125,28 @@ function demoState(): PersistedState {
   }
 }
 
+// 旧版本地数据里段落只有 locked 标记，这里统一迁移为审校状态与意见记录。
+function normalizeDraft(draft: LanguageDraft) {
+  draft.segments = (draft.segments || []).map((segment) => {
+    const legacy = segment as Segment & { locked?: boolean }
+    return {
+      id: legacy.id,
+      label: legacy.label,
+      content: legacy.content,
+      reviewStatus: legacy.reviewStatus || (legacy.locked ? 'confirmed' : 'pending'),
+      reviewLog: Array.isArray(legacy.reviewLog) ? legacy.reviewLog : []
+    }
+  })
+}
+
+function normalizeState(data: PersistedState): PersistedState {
+  for (const exhibit of data.exhibits || []) {
+    for (const draft of exhibit.drafts || []) normalizeDraft(draft)
+  }
+  for (const version of data.versions || []) normalizeDraft(version.draft)
+  return data
+}
+
 export const useScriptStore = defineStore('museum-script', {
   state: () => ({
     halls: [] as Hall[],
@@ -145,7 +178,20 @@ export const useScriptStore = defineStore('museum-script', {
       return (this.selectedDraft?.narration || '').replace(/\s/g, '').length
     },
     canUndo(state): boolean { return state.past.length > 0 },
-    canRedo(state): boolean { return state.future.length > 0 }
+    canRedo(state): boolean { return state.future.length > 0 },
+    confirmedCount(): number {
+      return (this.selectedDraft?.segments || []).filter(segment => segment.reviewStatus === 'confirmed').length
+    },
+    returnedCount(): number {
+      return (this.selectedDraft?.segments || []).filter(segment => segment.reviewStatus === 'returned').length
+    },
+    todoSegments(): Segment[] {
+      return (this.selectedDraft?.segments || []).filter(segment => segment.reviewStatus !== 'confirmed')
+    },
+    allSegmentsConfirmed(): boolean {
+      const list = this.selectedDraft?.segments || []
+      return list.length > 0 && list.every(segment => segment.reviewStatus === 'confirmed')
+    }
   },
   actions: {
     hydrate() {
@@ -153,7 +199,7 @@ export const useScriptStore = defineStore('museum-script', {
       const saved = localStorage.getItem(STORAGE_KEY)
       if (saved) {
         try {
-          const data = JSON.parse(saved) as PersistedState
+          const data = normalizeState(JSON.parse(saved) as PersistedState)
           this.$patch({ ...data, hydrated: true })
           if (!this.halls.length || !this.exhibits.length) this.resetDemo()
         } catch {
@@ -215,40 +261,85 @@ export const useScriptStore = defineStore('museum-script', {
     },
     updateDraft(patch: Partial<Pick<LanguageDraft, 'title' | 'narration' | 'accessibility' | 'durationMinutes' | 'sources'>>) {
       const draft = this.selectedDraft
-      if (!draft) return
+      if (!draft || draft.status === 'approved') return
       this.commit(() => Object.assign(draft, patch, { updatedAt: new Date().toISOString() }))
       this.notice = '改动已自动保存到浏览器。'
     },
     updateSegment(id: string, patch: Partial<Pick<Segment, 'label' | 'content'>>) {
-      const segment = this.selectedDraft?.segments.find(item => item.id === id)
-      if (!segment || segment.locked) return
+      const draft = this.selectedDraft
+      const segment = draft?.segments.find(item => item.id === id)
+      if (!draft || !segment || draft.status === 'approved' || segment.reviewStatus === 'confirmed') return
       this.commit(() => Object.assign(segment, patch))
-    },
-    toggleLock(id: string) {
-      const segment = this.selectedDraft?.segments.find(item => item.id === id)
-      if (!segment) return
-      this.commit(() => { segment.locked = !segment.locked })
-      this.notice = segment.locked ? '段落已锁定，避免误改。' : '段落已解锁。'
     },
     addSegment() {
       const draft = this.selectedDraft
-      if (!draft) return
-      this.commit(() => draft.segments.push({ id: `segment-${Date.now()}`, label: `新段落 ${draft.segments.length + 1}`, content: '', locked: false }))
+      if (!draft || draft.status === 'approved') return
+      this.commit(() => draft.segments.push({ id: `segment-${Date.now()}`, label: `新段落 ${draft.segments.length + 1}`, content: '', reviewStatus: 'pending', reviewLog: [] }))
     },
     removeSegment(id: string) {
       const draft = this.selectedDraft
       const segment = draft?.segments.find(item => item.id === id)
-      if (!draft || !segment || segment.locked) return
+      if (!draft || !segment || draft.status === 'approved' || segment.reviewStatus === 'confirmed') return
       this.commit(() => { draft.segments = draft.segments.filter(item => item.id !== id) })
     },
-    setStatus(status: ScriptStatus) {
+    confirmSegment(id: string) {
       const draft = this.selectedDraft
-      if (!draft) return
-      this.commit(() => { draft.status = status; draft.updatedAt = new Date().toISOString() })
-      this.notice = `状态已更新为“${this.statusLabel(status)}”。`
+      const segment = draft?.segments.find(item => item.id === id)
+      if (!draft || !segment || draft.status !== 'review' || segment.reviewStatus === 'confirmed') return
+      this.commit(() => {
+        segment.reviewStatus = 'confirmed'
+        draft.updatedAt = new Date().toISOString()
+      })
+      this.notice = `「${segment.label}」已确认并锁定。`
+    },
+    returnSegment(id: string, note: string) {
+      const draft = this.selectedDraft
+      const segment = draft?.segments.find(item => item.id === id)
+      const reason = note.trim()
+      if (!draft || !segment || draft.status !== 'review' || !reason) return
+      this.commit(() => {
+        segment.reviewStatus = 'returned'
+        segment.reviewLog.unshift({ id: `review-${Date.now()}`, type: 'return', note: reason, createdAt: new Date().toISOString() })
+        draft.status = 'returned'
+        draft.updatedAt = new Date().toISOString()
+      })
+      this.notice = `已退回「${segment.label}」，已确认段落保持锁定。`
+    },
+    resubmitSegment(id: string, note?: string) {
+      const draft = this.selectedDraft
+      const segment = draft?.segments.find(item => item.id === id)
+      if (!draft || !segment || segment.reviewStatus !== 'returned') return
+      const reply = (note || '').trim()
+      this.commit(() => {
+        segment.reviewStatus = 'pending'
+        if (reply) segment.reviewLog.unshift({ id: `review-${Date.now()}`, type: 'resubmit', note: reply, createdAt: new Date().toISOString() })
+        draft.updatedAt = new Date().toISOString()
+      })
+      this.notice = `「${segment.label}」已重新提交，退回标记已清除，意见保留在记录中。`
+    },
+    submitForReview() {
+      const draft = this.selectedDraft
+      if (!draft || draft.status === 'approved') return
+      this.commit(() => { draft.status = 'review'; draft.updatedAt = new Date().toISOString() })
+      this.notice = '已提交送审，等待专家逐段确认。'
+    },
+    approveDraft() {
+      const draft = this.selectedDraft
+      if (!draft || draft.status !== 'review' || !this.allSegmentsConfirmed) return
+      this.commit(() => { draft.status = 'approved'; draft.updatedAt = new Date().toISOString() })
+      this.notice = '所有段落已确认，稿件已定稿并锁定。'
+    },
+    reopenDraft() {
+      const draft = this.selectedDraft
+      if (!draft || draft.status !== 'approved') return
+      this.commit(() => { draft.status = 'draft'; draft.updatedAt = new Date().toISOString() })
+      this.notice = '已开启修订：段落保持锁定，提交送审后由专家退回需要修改的段落。'
     },
     statusLabel(status: ScriptStatus) {
       return ({ draft: '草稿', review: '待审', returned: '退回', approved: '已定稿' })[status]
+    },
+    segmentStatusLabel(status: SegmentReviewStatus) {
+      return ({ pending: '待确认', confirmed: '已确认', returned: '已退回' })[status]
     },
     createVersion(name?: string) {
       const draft = this.selectedDraft
@@ -267,17 +358,24 @@ export const useScriptStore = defineStore('museum-script', {
     restoreVersion(id: string) {
       const version = this.versions.find(item => item.id === id)
       if (!version) return
+      const exhibit = this.exhibits.find(item => item.id === version.exhibitId)
+      const current = exhibit?.drafts.find(item => item.languageId === version.languageId)
+      if (current?.status === 'approved') {
+        this.notice = '已定稿语言不能直接覆盖，请先“开启修订”再恢复版本。'
+        return
+      }
       this.commit(() => {
-        const exhibit = this.exhibits.find(item => item.id === version.exhibitId)
         if (!exhibit) return
         const index = exhibit.drafts.findIndex(item => item.languageId === version.languageId)
         const restored = JSON.parse(JSON.stringify(version.draft)) as LanguageDraft
+        restored.status = 'review'
+        restored.updatedAt = new Date().toISOString()
         if (index >= 0) exhibit.drafts[index] = restored
         else exhibit.drafts.push(restored)
       })
       this.selectedExhibitId = version.exhibitId
       this.selectedLanguageId = version.languageId
-      this.notice = '版本已恢复，并作为一次可撤销操作保存。'
+      this.notice = '版本已恢复：段落锁定与审校意见一并还原，稿件重新进入待审。'
     },
     undo() {
       const state = this.past.pop()
@@ -293,7 +391,6 @@ export const useScriptStore = defineStore('museum-script', {
       const state = this.future.pop()
       if (!state) return
       this.past.push(this.snapshot())
-      this.$patch(JSON.parse(state))
       this.lastSavedAt = new Date().toISOString()
       this.ensureSelection()
       this.persist()
